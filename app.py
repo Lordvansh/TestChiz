@@ -14,7 +14,7 @@ from google.protobuf.message import DecodeError
 
 app = Flask(__name__)
 
-TOKENS_FILE = "tokens.json"   # Only India tokens here
+TOKENS_FILE = "tokens.json"   # Pre-generated India tokens
 
 
 # ---------------- TOKEN MANAGEMENT ---------------- #
@@ -25,7 +25,7 @@ def load_tokens():
             tokens = json.load(f)
         return tokens
     except Exception as e:
-        app.logger.error(f"Error loading tokens: {e}")
+        app.logger.error(f"Error loading {TOKENS_FILE}: {e}")
         return None
 
 
@@ -43,7 +43,7 @@ def encrypt_message(plaintext):
 def create_protobuf_message(user_id):
     message = like_pb2.like()
     message.uid = int(user_id)
-    message.region = "IND"   # hardcoded India region
+    message.region = "IND"   # Hardcoded for India
     return message.SerializeToString()
 
 
@@ -63,9 +63,12 @@ def decode_protobuf(binary):
         items = like_count_pb2.Info()
         items.ParseFromString(bytes.fromhex(binary))
         return items
-    except DecodeError as e:
-        app.logger.error(f"Error decoding Protobuf data: {e}")
-        return None
+    except Exception:
+        # fallback: return raw response if not valid protobuf
+        try:
+            return {"raw_response": bytes.fromhex(binary).decode(errors="ignore")}
+        except Exception:
+            return {"raw_response": binary}
 
 
 # ---------------- NETWORK ---------------- #
@@ -110,10 +113,11 @@ def make_request(encrypt, token, url):
         'Content-Type': "application/x-www-form-urlencoded",
     }
     response = requests.post(url, data=edata, headers=headers, verify=False)
+
     try:
         return decode_protobuf(response.content.hex())
-    except Exception:
-        return {"raw_response": response.content.decode(errors="ignore")}
+    except Exception as e:
+        return {"raw_response": response.content.decode(errors="ignore"), "error": str(e)}
 
 
 # ---------------- ROUTES ---------------- #
@@ -132,17 +136,18 @@ def handle_requests():
         token = tokens[0]['token']
         encrypted_uid = enc(uid)
 
-        # Before likes
+        # India endpoints
         info_url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
         like_url = "https://clientbp.ggblueshark.com/LikeProfile"
 
+        # Before likes
         before = make_request(encrypted_uid, token, info_url)
         if isinstance(before, dict) and "raw_response" in before:
             return jsonify({"error": "Unexpected response before likes", "details": before["raw_response"]})
 
         before_like = int(json.loads(MessageToJson(before)).get('AccountInfo', {}).get('Likes', 0))
 
-        # Send likes with all tokens
+        # Send likes
         asyncio.run(send_multiple_requests(uid, like_url, total_requests=len(tokens)))
 
         # After likes
