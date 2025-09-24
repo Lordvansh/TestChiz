@@ -13,14 +13,12 @@ import uid_generator_pb2
 
 app = Flask(__name__)
 
-# ---------------- CONFIG ---------------- #
 TOKENS_FILE = "tokens.json"   # pre-generated tokens file
 
 
 # ---------------- TOKEN MANAGEMENT ---------------- #
 
 def load_tokens():
-    """Load tokens directly from tokens.json."""
     try:
         with open(TOKENS_FILE, "r") as f:
             tokens = json.load(f)
@@ -110,7 +108,12 @@ def make_request(encrypt, server_name, token):
         'Content-Type': "application/x-www-form-urlencoded",
     }
     response = requests.post(url_map.get(server_name, url_map["ME"]), data=edata, headers=headers, verify=False)
-    return decode_protobuf(response.content.hex())
+
+    try:
+        return decode_protobuf(response.content.hex())
+    except Exception:
+        # If protobuf fails, show raw response
+        return {"raw_response": response.content.decode(errors="ignore")}
 
 
 # ---------------- ROUTES ---------------- #
@@ -132,6 +135,9 @@ def handle_requests():
 
         # Before likes
         before = make_request(encrypted_uid, server_name, token)
+        if isinstance(before, dict) and "raw_response" in before:
+            return jsonify({"error": "Unexpected response before likes", "details": before["raw_response"]})
+
         before_like = int(json.loads(MessageToJson(before)).get('AccountInfo', {}).get('Likes', 0))
 
         url_map = {
@@ -148,6 +154,9 @@ def handle_requests():
 
         # After likes
         after = make_request(encrypted_uid, server_name, token)
+        if isinstance(after, dict) and "raw_response" in after:
+            return jsonify({"error": "Unexpected response after likes", "details": after["raw_response"]})
+
         data_after = json.loads(MessageToJson(after))
         after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
         player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
