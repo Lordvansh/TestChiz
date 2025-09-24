@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify
 import asyncio
+import random
+import time
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from google.protobuf.json_format import MessageToJson
@@ -15,6 +17,13 @@ from google.protobuf.message import DecodeError
 app = Flask(__name__)
 
 TOKENS_FILE = "tokens.json"   # Pre-generated India tokens
+
+# ---------------- PROXY ---------------- #
+PROXY_AUTH = "Quantum-xeqty9ai:PjU3hbsGPEu3iIMT9kpo_country-SG"
+PROXY_HOST = "schro.quantumproxies.net:1111"
+
+PROXY_URL = f"http://{PROXY_AUTH}@{PROXY_HOST}"
+PROXIES = {"http": PROXY_URL, "https": PROXY_URL}
 
 
 # ---------------- TOKEN MANAGEMENT ---------------- #
@@ -43,7 +52,7 @@ def encrypt_message(plaintext):
 def create_protobuf_message(user_id):
     message = like_pb2.like()
     message.uid = int(user_id)
-    message.region = "IND"   # Hardcoded for India
+    message.region = "IND"   # Hardcoded India region
     return message.SerializeToString()
 
 
@@ -64,7 +73,6 @@ def decode_protobuf(binary):
         items.ParseFromString(bytes.fromhex(binary))
         return items
     except Exception:
-        # fallback: return raw response if not valid protobuf
         try:
             return {"raw_response": bytes.fromhex(binary).decode(errors="ignore")}
         except Exception:
@@ -73,7 +81,7 @@ def decode_protobuf(binary):
 
 # ---------------- NETWORK ---------------- #
 
-async def send_request(encrypted_uid, token, url):
+async def send_request(encrypted_uid, token, url, retries=3):
     edata = bytes.fromhex(encrypted_uid)
     headers = {
         'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 10; ASUS_Z01QD Build/Release)",
@@ -86,9 +94,20 @@ async def send_request(encrypted_uid, token, url):
         'X-GA': "v1 1",
         'ReleaseVersion': "OB48"
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=edata, headers=headers) as response:
-            return await response.text() if response.status == 200 else f"HTTP {response.status}"
+    for attempt in range(retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=edata, headers=headers, proxy=PROXY_URL) as response:
+                    if response.status == 200:
+                        return await response.text()
+                    elif response.status == 503 and attempt < retries - 1:
+                        await asyncio.sleep(1)  # retry delay
+                    else:
+                        return f"HTTP {response.status}"
+        except Exception as e:
+            if attempt == retries - 1:
+                return f"Error: {e}"
+            await asyncio.sleep(1)
 
 
 async def send_multiple_requests(uid, url, total_requests=100):
@@ -98,11 +117,13 @@ async def send_multiple_requests(uid, url, total_requests=100):
     if not tokens:
         return None
 
-    tasks = []
+    results = []
     for i in range(total_requests):
-        token = tokens[i % len(tokens)]["token"]
-        tasks.append(send_request(encrypted_uid, token, url))
-    return await asyncio.gather(*tasks, return_exceptions=True)
+        token = random.choice(tokens)["token"]  # rotate tokens
+        result = await send_request(encrypted_uid, token, url)
+        results.append(result)
+        await asyncio.sleep(0.2)  # throttle delay
+    return results
 
 
 def make_request(encrypt, token, url):
@@ -112,7 +133,7 @@ def make_request(encrypt, token, url):
         'Authorization': f"Bearer {token}",
         'Content-Type': "application/x-www-form-urlencoded",
     }
-    response = requests.post(url, data=edata, headers=headers, verify=False)
+    response = requests.post(url, data=edata, headers=headers, proxies=PROXIES, verify=False)
 
     try:
         return decode_protobuf(response.content.hex())
@@ -133,7 +154,7 @@ def handle_requests():
         if not tokens:
             return jsonify({"error": "No tokens available"}), 500
 
-        token = tokens[0]['token']
+        token = random.choice(tokens)['token']  # rotate info token
         encrypted_uid = enc(uid)
 
         # India endpoints
@@ -181,7 +202,8 @@ def debug():
     tokens = load_tokens()
     return jsonify({
         "TokenCount": len(tokens) if tokens else 0,
-        "SampleUID": tokens[0]["uid"] if tokens else None
+        "SampleUID": tokens[0]["uid"] if tokens else None,
+        "Proxy": PROXY_URL
     })
 
 
