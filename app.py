@@ -16,7 +16,7 @@ from google.protobuf.message import DecodeError
 
 app = Flask(__name__)
 
-TOKEN_API = "https://ff-token-generator.vercel.app/token?uid={uid}&password={password}"
+TOKEN_API = "https://jnl-gen-jwt.vercel.app/token?uid={uid}&password={password}"
 TOKEN_REFRESH_BUFFER = 300  # seconds (5 minutes before expiry)
 
 # ---------------- TOKEN HANDLING ---------------- #
