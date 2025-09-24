@@ -7,89 +7,27 @@ import binascii
 import aiohttp
 import requests
 import json
-import os
-import time
-import jwt
 import like_pb2
 import like_count_pb2
 import uid_generator_pb2
-from google.protobuf.message import DecodeError
 
 app = Flask(__name__)
 
 # ---------------- CONFIG ---------------- #
-TOKEN_API = "https://narayan-gwt-token-api.vercel.app/token?uid={uid}&password={password}"
-ACCOUNTS_FILE = "token_ind.json"   # contains UID+password-hash
-CACHE_FILE = "active_tokens.json"  # cached JWT tokens
-TOKEN_REFRESH_BUFFER = 300         # refresh 5 mins before expiry
+TOKENS_FILE = "tokens.json"   # pre-generated tokens file
 
 
 # ---------------- TOKEN MANAGEMENT ---------------- #
 
-def is_token_expired(token: str) -> bool:
+def load_tokens():
+    """Load tokens directly from tokens.json."""
     try:
-        payload = jwt.decode(token, options={"verify_signature": False})
-        exp = payload.get("exp")
-        if not exp:
-            return True
-        return int(time.time()) >= exp - TOKEN_REFRESH_BUFFER
-    except Exception:
-        return True
-
-
-def fetch_tokens_from_accounts():
-    if not os.path.exists(ACCOUNTS_FILE):
-        app.logger.error(f"{ACCOUNTS_FILE} not found.")
-        return None
-
-    try:
-        with open(ACCOUNTS_FILE, "r") as f:
-            accounts = json.load(f)
-    except Exception as e:
-        app.logger.error(f"Error reading {ACCOUNTS_FILE}: {e}")
-        return None
-
-    tokens = []
-    for acc in accounts:
-        uid = acc.get("uid")
-        password = acc.get("password")
-        if not uid or not password:
-            continue
-        try:
-            url = TOKEN_API.format(uid=uid, password=password)
-            resp = requests.get(url, timeout=8)
-            if resp.status_code == 200:
-                data = resp.json()
-                token = data.get("token")
-                if token:
-                    tokens.append({"token": token})
-                    app.logger.info(f"[{uid}] token generated.")
-            else:
-                app.logger.error(f"[{uid}] status {resp.status_code}")
-        except Exception as e:
-            app.logger.error(f"[{uid}] error: {e}")
-
-    if tokens:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(tokens, f, indent=4)
+        with open(TOKENS_FILE, "r") as f:
+            tokens = json.load(f)
         return tokens
-    return None
-
-
-def load_tokens(server_name):
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r") as f:
-                tokens = json.load(f)
-            if tokens and "token" in tokens[0]:
-                if is_token_expired(tokens[0]["token"]):
-                    app.logger.info("Tokens expired → regenerating...")
-                    return fetch_tokens_from_accounts()
-                return tokens
-        except Exception as e:
-            app.logger.error(f"Error reading {CACHE_FILE}: {e}")
-
-    return fetch_tokens_from_accounts()
+    except Exception as e:
+        app.logger.error(f"❌ Error reading {TOKENS_FILE}: {e}")
+        return None
 
 
 # ---------------- ENCRYPTION ---------------- #
@@ -146,7 +84,7 @@ async def send_request(encrypted_uid, token, url):
 
 async def send_multiple_requests(uid, server_name, url, total_requests=50):
     encrypted_uid = encrypt_message(create_protobuf_message(uid, server_name))
-    tokens = load_tokens(server_name)
+    tokens = load_tokens()
     if not tokens:
         return None
 
@@ -185,7 +123,7 @@ def handle_requests():
         return jsonify({"error": "UID and server_name are required"}), 400
 
     try:
-        tokens = load_tokens(server_name)
+        tokens = load_tokens()
         if not tokens:
             return jsonify({"error": "No tokens available"}), 500
 
@@ -233,7 +171,7 @@ def handle_requests():
 
 @app.route('/debug', methods=['GET'])
 def debug():
-    return jsonify({"tokens": load_tokens("ME")})
+    return jsonify({"tokens": load_tokens()})
 
 
 if __name__ == '__main__':
