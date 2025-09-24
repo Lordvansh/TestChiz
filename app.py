@@ -7,14 +7,14 @@ import binascii
 import aiohttp
 import requests
 import json
-import jwt
 import like_pb2
 import like_count_pb2
 import uid_generator_pb2
+from google.protobuf.message import DecodeError
 
 app = Flask(__name__)
 
-TOKENS_FILE = "tokens.json"   # pre-generated tokens file
+TOKENS_FILE = "tokens.json"   # Only India tokens here
 
 
 # ---------------- TOKEN MANAGEMENT ---------------- #
@@ -25,21 +25,8 @@ def load_tokens():
             tokens = json.load(f)
         return tokens
     except Exception as e:
-        app.logger.error(f"❌ Error reading {TOKENS_FILE}: {e}")
+        app.logger.error(f"Error loading tokens: {e}")
         return None
-
-
-def get_region_from_token(token: str) -> str:
-    """Decode JWT and return region from claims."""
-    try:
-        payload = jwt.decode(token, options={"verify_signature": False})
-        # region can be in noti_region or lock_region
-        region = payload.get("noti_region") or payload.get("lock_region")
-        if not region:
-            return "ME"  # fallback default
-        return region.upper()
-    except Exception:
-        return "ME"  # fallback if token decoding fails
 
 
 # ---------------- ENCRYPTION ---------------- #
@@ -53,13 +40,12 @@ def encrypt_message(plaintext):
     return binascii.hexlify(encrypted_message).decode('utf-8')
 
 
-# ---------------- PROTOBUF HELPERS ---------------- #
-
-def create_protobuf_message(user_id, region):
+def create_protobuf_message(user_id):
     message = like_pb2.like()
     message.uid = int(user_id)
-    message.region = region
+    message.region = "IND"   # hardcoded India region
     return message.SerializeToString()
+
 
 def create_protobuf(uid):
     message = uid_generator_pb2.uid_generator()
@@ -67,14 +53,19 @@ def create_protobuf(uid):
     message.garena = 1
     return message.SerializeToString()
 
+
 def enc(uid):
     return encrypt_message(create_protobuf(uid))
 
 
 def decode_protobuf(binary):
-    items = like_count_pb2.Info()
-    items.ParseFromString(bytes.fromhex(binary))
-    return items
+    try:
+        items = like_count_pb2.Info()
+        items.ParseFromString(bytes.fromhex(binary))
+        return items
+    except DecodeError as e:
+        app.logger.error(f"Error decoding Protobuf data: {e}")
+        return None
 
 
 # ---------------- NETWORK ---------------- #
@@ -83,8 +74,11 @@ async def send_request(encrypted_uid, token, url):
     edata = bytes.fromhex(encrypted_uid)
     headers = {
         'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 10; ASUS_Z01QD Build/Release)",
+        'Connection': "Keep-Alive",
+        'Accept-Encoding': "gzip",
         'Authorization': f"Bearer {token}",
         'Content-Type': "application/x-www-form-urlencoded",
+        'Expect': "100-continue",
         'X-Unity-Version': "2019.4.11f1",
         'X-GA': "v1 1",
         'ReleaseVersion': "OB48"
@@ -94,8 +88,13 @@ async def send_request(encrypted_uid, token, url):
             return await response.text() if response.status == 200 else f"HTTP {response.status}"
 
 
-async def send_multiple_requests(uid, tokens, url, total_requests=50):
-    encrypted_uid = encrypt_message(create_protobuf_message(uid, "IND"))  # region not critical for like
+async def send_multiple_requests(uid, url, total_requests=100):
+    protobuf_message = create_protobuf_message(uid)
+    encrypted_uid = encrypt_message(protobuf_message)
+    tokens = load_tokens()
+    if not tokens:
+        return None
+
     tasks = []
     for i in range(total_requests):
         token = tokens[i % len(tokens)]["token"]
@@ -103,7 +102,7 @@ async def send_multiple_requests(uid, tokens, url, total_requests=50):
     return await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def make_request(encrypt, url, token):
+def make_request(encrypt, token, url):
     edata = bytes.fromhex(encrypt)
     headers = {
         'User-Agent': "Dalvik/2.1.0",
@@ -111,7 +110,6 @@ def make_request(encrypt, url, token):
         'Content-Type': "application/x-www-form-urlencoded",
     }
     response = requests.post(url, data=edata, headers=headers, verify=False)
-
     try:
         return decode_protobuf(response.content.hex())
     except Exception:
@@ -131,46 +129,24 @@ def handle_requests():
         if not tokens:
             return jsonify({"error": "No tokens available"}), 500
 
-        # Pick first token → detect region
-        sample_token = tokens[0]['token']
-        region = get_region_from_token(sample_token)
-
-        # Map region → endpoint
-        info_url_map = {
-            "IND": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow",
-            "ME": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow",
-            "BR": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-            "US": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-            "SAC": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-            "NA": "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
-        }
-        like_url_map = {
-            "IND": "https://clientbp.ggblueshark.com/LikeProfile",
-            "ME": "https://clientbp.ggblueshark.com/LikeProfile",
-            "BR": "https://client.us.freefiremobile.com/LikeProfile",
-            "US": "https://client.us.freefiremobile.com/LikeProfile",
-            "SAC": "https://client.us.freefiremobile.com/LikeProfile",
-            "NA": "https://client.us.freefiremobile.com/LikeProfile"
-        }
-
-        info_url = info_url_map.get(region, info_url_map["ME"])
-        like_url = like_url_map.get(region, like_url_map["ME"])
-
         token = tokens[0]['token']
         encrypted_uid = enc(uid)
 
         # Before likes
-        before = make_request(encrypted_uid, info_url, token)
+        info_url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+        like_url = "https://clientbp.ggblueshark.com/LikeProfile"
+
+        before = make_request(encrypted_uid, token, info_url)
         if isinstance(before, dict) and "raw_response" in before:
             return jsonify({"error": "Unexpected response before likes", "details": before["raw_response"]})
 
         before_like = int(json.loads(MessageToJson(before)).get('AccountInfo', {}).get('Likes', 0))
 
-        # Send likes
-        asyncio.run(send_multiple_requests(uid, tokens, like_url, total_requests=len(tokens)))
+        # Send likes with all tokens
+        asyncio.run(send_multiple_requests(uid, like_url, total_requests=len(tokens)))
 
         # After likes
-        after = make_request(encrypted_uid, info_url, token)
+        after = make_request(encrypted_uid, token, info_url)
         if isinstance(after, dict) and "raw_response" in after:
             return jsonify({"error": "Unexpected response after likes", "details": after["raw_response"]})
 
@@ -183,7 +159,6 @@ def handle_requests():
         status = 1 if like_given > 0 else 2
 
         return jsonify({
-            "RegionDetected": region,
             "LikesGivenByAPI": like_given,
             "LikesafterCommand": after_like,
             "LikesbeforeCommand": before_like,
@@ -199,14 +174,9 @@ def handle_requests():
 @app.route('/debug', methods=['GET'])
 def debug():
     tokens = load_tokens()
-    if not tokens:
-        return jsonify({"error": "No tokens loaded"})
-    first_token = tokens[0]['token']
-    region = get_region_from_token(first_token)
     return jsonify({
-        "RegionDetected": region,
-        "SampleTokenUID": tokens[0].get("uid"),
-        "TokenCount": len(tokens)
+        "TokenCount": len(tokens) if tokens else 0,
+        "SampleUID": tokens[0]["uid"] if tokens else None
     })
 
 
